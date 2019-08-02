@@ -24,7 +24,7 @@ package org.openjdk.skara.webrev;
 
 import org.openjdk.skara.vcs.PatchStats;
 
-class WebrevStats {
+public class WebrevStats {
     private final int added;
     private final int removed;
     private final int modified;

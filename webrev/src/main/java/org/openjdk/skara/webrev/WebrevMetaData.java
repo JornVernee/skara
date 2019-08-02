@@ -28,25 +28,124 @@ import java.net.URISyntaxException;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.util.Map;
 import java.util.Optional;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.util.stream.Collectors;
 
 public class WebrevMetaData {
     private static final Pattern findPatchPattern = Pattern.compile(
-            "[ ]*(?:<td>)?<a href=\".*\">(?<patchName>.*\\.patch)</a></td>(?:</tr>)?$");
+            "<a href=\".*\">(?<patchName>.*\\.patch)</a>");
 
+    private static final Pattern findChangeSetPattern = Pattern.compile(
+            "<a href=\".*\">(?<changeSetName>.*\\.changeset)</a>");
+
+    private static final Pattern summaryPattern = Pattern.compile(
+            "(?<linesChanged>\\d+) lines? changed:" +
+                    " (?<insertions>\\d+) ins;" +
+                    " (?<deletions>\\d+) del;" +
+                    " (?<modifications>\\d+) mod;" +
+                    " (?<unchanged>\\d+) unchg"
+    );
+
+    private static final Pattern findHeaderValuePattern = Pattern.compile(
+            "<tr>\\s*<th>\\n?(?<key>.*):\\n?</th>\\s*<td>\\n?(?<value>.*)\\n?</td>\\s*</tr>");
+
+    private final URI webrevURI;
+
+    private final Optional<String> branch;
+    private final Optional<String> author;
+    private final Optional<WebrevStats> summary;
+    private final Optional<String> workspace;
+    private final Optional<URI> repository;
+    private final Optional<String> compareAgainst;
+    private final Optional<String> compareAgainstVersion;
+    private final Optional<String> compareAgainstRevision;
     private final Optional<URI> patchURI;
+    private final Optional<URI> changesetURI;
 
-    public WebrevMetaData(Optional<URI> patchURI) {
+    public WebrevMetaData(URI webrevURI, Optional<String> branch, Optional<String> author,
+                          Optional<WebrevStats> summary, Optional<String> workspace, Optional<URI> repository,
+                          Optional<String> compareAgainst, Optional<String> compareAgainstVersion,
+                          Optional<String> compareAgainstRevision, Optional<URI> patchURI, Optional<URI> changesetURI) {
+        this.webrevURI = webrevURI;
+        this.branch = branch;
+        this.author = author;
+        this.summary = summary;
+        this.workspace = workspace;
+        this.repository = repository;
+        this.compareAgainst = compareAgainst;
+        this.compareAgainstVersion = compareAgainstVersion;
+        this.compareAgainstRevision = compareAgainstRevision;
         this.patchURI = patchURI;
+        this.changesetURI = changesetURI;
     }
 
     public static WebrevMetaData fromWebrevURL(String uri) throws IOException, URISyntaxException, InterruptedException {
-        var sanatizedUri = sanitizeURI(uri);
-        var patchFile = getPatchFile(sanatizedUri);
+        var sanitizedUri = sanitizeURI(uri);
+        var client = HttpClient.newHttpClient();
+        var findPatchFileRequest = HttpRequest.newBuilder()
+                .uri(sanitizedUri)
+                .build();
+        var header = client.send(findPatchFileRequest, HttpResponse.BodyHandlers.ofLines())
+                .body()
+                .dropWhile(s -> !s.startsWith("<table>"))
+                .takeWhile(s -> !s.startsWith("</table>"))
+                .map(findHeaderValuePattern::matcher)
+                .filter(Matcher::find)
+                .collect(Collectors.toMap(m -> m.group("key"), m -> m.group("value")));
 
-        return new WebrevMetaData(patchFile);
+        augmentHeaderFromURL(header, uri);
+
+        var patchURI = Optional.ofNullable(header.get("Patch of changes"))
+                .map(findPatchPattern::matcher)
+                .filter(Matcher::find)
+                .map(m -> m.group("patchName"))
+                .map(sanitizedUri::resolve);
+
+        var changesetURI = Optional.ofNullable(header.get("Changeset"))
+                .map(findChangeSetPattern::matcher)
+                .filter(Matcher::find)
+                .map(m -> m.group("changeSetName"))
+                .map(sanitizedUri::resolve);
+
+        var author = Optional.ofNullable(header.get("Prepared by"))
+                .map(s -> s.split(" ")[0]);
+
+        var branch = Optional.ofNullable(header.get("Branch"));
+
+        var summary = Optional.ofNullable(header.get("Summary of changes"))
+                .flatMap(WebrevMetaData::parseSummary);
+
+        var workspace = Optional.ofNullable(header.get("Workspace"));
+
+        var repository = Optional.ofNullable(header.get("Repository"))
+                .map(URI::create);
+
+        var compareAgainst = Optional.ofNullable(header.get("Compare against"));
+        var compareAgainstVersion = Optional.ofNullable(header.get("Compare against version"));
+        var compareAgainstRevision = Optional.ofNullable(header.get("Compare against revision"));
+
+        return new WebrevMetaData(sanitizedUri, branch, author, summary, workspace, repository, compareAgainst,
+                                  compareAgainstVersion, compareAgainstRevision, patchURI, changesetURI);
+    }
+
+    private static void augmentHeaderFromURL(Map<String, String> header, String uri) {
+        // TODO parse URL and add values to header (if not already present)
+    }
+
+    private static Optional<WebrevStats> parseSummary(String s) {
+        var matcher = summaryPattern.matcher(s);
+        if (matcher.find()) {
+            return Optional.of(new WebrevStats(
+                Integer.parseInt(matcher.group("insertions")),
+                Integer.parseInt(matcher.group("deletions")),
+                Integer.parseInt(matcher.group("modifications")),
+                Integer.parseInt(matcher.group("linesChanged"))
+            ));
+        }
+        return Optional.empty();
     }
 
     private static String dropSuffix(String s, String suffix) {
@@ -61,21 +160,47 @@ public class WebrevMetaData {
         return new URI(uri);
     }
 
-    private static Optional<URI> getPatchFile(URI uri) throws IOException, InterruptedException {
-        var client = HttpClient.newHttpClient();
-        var findPatchFileRcequest = HttpRequest.newBuilder()
-                .uri(uri)
-                .build();
-        return client.send(findPatchFileRcequest, HttpResponse.BodyHandlers.ofLines())
-                .body()
-                .map(findPatchPattern::matcher)
-                .filter(Matcher::matches)
-                .findFirst()
-                .map(m -> m.group("patchName"))
-                .map(uri::resolve);
+    public URI webrevURI() {
+        return webrevURI;
+    }
+
+    public Optional<String> branch() {
+        return branch;
+    }
+
+    public Optional<String> author() {
+        return author;
+    }
+
+    public Optional<WebrevStats> summary() {
+        return summary;
+    }
+
+    public Optional<String> workspace() {
+        return workspace;
+    }
+
+    public Optional<URI> repository() {
+        return repository;
+    }
+
+    public Optional<String> compareAgainst() {
+        return compareAgainst;
+    }
+
+    public Optional<String> compareAgainstVersion() {
+        return compareAgainstVersion;
+    }
+
+    public Optional<String> compareAgainstRevision() {
+        return compareAgainstRevision;
     }
 
     public Optional<URI> patchURI() {
         return patchURI;
+    }
+
+    public Optional<URI> changesetURI() {
+        return changesetURI;
     }
 }
