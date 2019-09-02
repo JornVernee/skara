@@ -142,13 +142,7 @@ public class GitWebrev {
             System.exit(0);
         }
 
-        var cwd = Paths.get("").toAbsolutePath();
-        var repository = ReadOnlyRepository.get(cwd);
-        if (!repository.isPresent()) {
-            System.err.println(String.format("error: %s is not a repository", cwd.toString()));
-            System.exit(1);
-        }
-        var repo = repository.get();
+        var repo = getRepo();
         var isMercurial = arguments.contains("mercurial");
 
         var upstream = arg("repository", arguments, repo);
@@ -263,12 +257,7 @@ public class GitWebrev {
         var parser = new ArgumentParser("git webrev apply", List.of(), inputs);
         var arguments = parser.parse(args);
 
-        var cwd = Paths.get("").toAbsolutePath();
-        var repository = Repository.get(cwd).orElseGet(() -> {
-            System.err.println(String.format("error: %s is not a repository", cwd.toString()));
-            System.exit(1);
-            return null;
-        });
+        var repository = getRepo();
 
         var inputString = arguments.at(0).asString();
         var webrevMetaData = WebrevMetaData.fromWebrevURL(inputString);
@@ -289,6 +278,75 @@ public class GitWebrev {
         return patchFile;
     }
 
+    private static void fetch(String[] args) throws Exception {
+        var flags = List.of(
+                Option.shortcut("b")
+                      .fullname("branch")
+                      .describe("BRANCH")
+                      .helptext("the name of the branch of the new branch to create. (default is WEBREV_FETCH_HEAD)")
+                      .optional(),
+                Option.shortcut("")
+                      .fullname("ref")
+                      .describe("REFSPEC")
+                      .helptext("ref to which to apply this webrev")
+                      .optional());
+
+        var inputs = List.of(
+            Input.position(0)
+                 .describe("webrev url")
+                 .singular()
+                 .required());
+
+        var parser = new ArgumentParser("git webrev apply", flags, inputs);
+        var arguments = parser.parse(args);
+
+        var repo = getRepo();
+        if (!repo.isClean()) {
+            throw new IllegalStateException("Repo is not clean");
+        }
+
+        var branch = arguments.contains("branch")
+               ? arguments.get("branch").asString()
+               : "WEBREV_FETCH_HEAD";
+
+        var webrevMetdaData = WebrevMetaData.fromWebrevURL(arguments.at(0).asString());
+        var patchURI = webrevMetdaData.patchURI()
+                .orElseThrow(() -> new IllegalStateException("Could not find patch file in webrev"));
+        var patch = downloadPatchFile(patchURI);
+
+        Hash targetHash;
+        if (arguments.contains("ref")) {
+            targetHash = resolve(repo, arguments.get("ref").asString());
+        } else if (webrevMetdaData.compareAgainstRevision().isPresent()) { // hash
+            targetHash = new Hash(webrevMetdaData.compareAgainstRevision().get());
+        } else if (webrevMetdaData.branch().isPresent()) {
+            var onto = webrevMetdaData.branch().get();
+            if (repo.branches().stream().map(Branch::name).anyMatch(onto::equals)) {
+                targetHash = resolve(repo, onto);
+            } else {
+                throw new IllegalStateException(
+                        "Webrev applies to branch '" + onto + "', but this repo has no such branch");
+            }
+        } else {
+            throw new IllegalStateException(
+                    "Found no information indicating where to apply this webrev." +
+                    "Use --ref to specify ref explicitly");
+        }
+        var newBranch = repo.branch(targetHash, branch);
+        repo.checkout(newBranch);
+        repo.apply(patch, false);
+        repo.commit(arguments.at(0).asString(), webrevMetdaData.author().orElse(""), "");
+    }
+
+    private static Repository getRepo() throws IOException {
+        var cwd = Paths.get("").toAbsolutePath();
+        return Repository.get(cwd).orElseGet(() -> {
+            System.err.println(String.format("error: %s is not a repository", cwd.toString()));
+            System.exit(1);
+            return null;
+        });
+    }
+
     public static void main(String[] args) throws Exception {
         var commands = List.of(
                     Default.name("generate")
@@ -296,7 +354,10 @@ public class GitWebrev {
                            .main(GitWebrev::generate),
                     Command.name("apply")
                            .helptext("apply a webrev from a webrev url")
-                           .main(GitWebrev::apply)
+                           .main(GitWebrev::apply),
+                    Command.name("fetch")
+                           .helptext("apply a webrev as a commit to a separate branch")
+                           .main(GitWebrev::fetch)
                 );
 
         var parser = new MultiCommandParser("git webrev", commands);

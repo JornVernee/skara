@@ -28,6 +28,7 @@ import java.net.URISyntaxException;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.util.HashMap;
 import java.util.Map;
 import java.util.Optional;
 import java.util.regex.Matcher;
@@ -88,13 +89,17 @@ public class WebrevMetaData {
         var findPatchFileRequest = HttpRequest.newBuilder()
                 .uri(sanitizedUri)
                 .build();
-        var header = client.send(findPatchFileRequest, HttpResponse.BodyHandlers.ofLines())
+        var headerStr = client.send(findPatchFileRequest, HttpResponse.BodyHandlers.ofLines())
                 .body()
                 .dropWhile(s -> !s.startsWith("<table>"))
+                .skip(1)
                 .takeWhile(s -> !s.startsWith("</table>"))
-                .map(findHeaderValuePattern::matcher)
-                .filter(Matcher::find)
-                .collect(Collectors.toMap(m -> m.group("key"), m -> m.group("value")));
+                .collect(Collectors.joining("\n"));
+        var fieldMatcher = findHeaderValuePattern.matcher(headerStr);
+        Map<String, String> header = new HashMap<>();
+        while (fieldMatcher.find()) {
+            header.put(fieldMatcher.group("key"), fieldMatcher.group("value"));
+        }
 
         augmentHeaderFromURL(header, uri);
 
