@@ -129,6 +129,11 @@ class IndexView implements View {
 
     private final List<FileView> files;
     private final Map<String, String> map;
+    private final Map<Class<?>, Integer> typePriority = Map.of(
+        ModifiedFileView.class, 0,
+        AddedFileView.class, 1,
+        RemovedFileView.class, 2
+    );
 
     public IndexView(List<FileView> files,
                      String title,
@@ -142,6 +147,7 @@ class IndexView implements View {
                      Path patchFile,
                      WebrevStats stats) {
         this.files = files;
+        this.files.sort(Comparator.comparingInt(f -> typePriority.get(f.getClass())));
         map = new HashMap<String, String>(); 
 
         if (user != null) {
